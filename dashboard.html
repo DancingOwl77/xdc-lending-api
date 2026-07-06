@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LendWatch XDC — Live Dashboard</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+
+  :root {
+    --bg:       #0a0c10;
+    --surface:  #111318;
+    --border:   #1e2330;
+    --xdc:      #00c4a0;
+    --xdc-dim:  #00c4a020;
+    --xdc-mid:  #00c4a060;
+    --usdc:     #2775ca;
+    --usdc-dim: #2775ca18;
+    --warn:     #f5a623;
+    --danger:   #e05252;
+    --text:     #e8eaf0;
+    --muted:    #5a6170;
+    --label:    #8892a0;
+    --mono:     'IBM Plex Mono', monospace;
+    --sans:     'IBM Plex Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    min-height: 100vh;
+  }
+
+  /* ── HEADER ── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 0 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 56px;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: var(--xdc);
+  }
+
+  .logo-dot {
+    width: 8px; height: 8px;
+    background: var(--xdc);
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+  }
+
+  .status-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--xdc-dim);
+    border: 1px solid var(--xdc-mid);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--xdc);
+  }
+
+  .status-pill-dot {
+    width: 6px; height: 6px;
+    background: var(--xdc);
+    border-radius: 50%;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  .network-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 3px 8px;
+  }
+
+  /* ── MAIN LAYOUT ── */
+  main {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 32px;
+  }
+
+  .page-title {
+    margin-bottom: 8px;
+  }
+
+  .page-title h1 {
+    font-size: 22px;
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  .page-title p {
+    font-size: 13px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  /* ── STAT CARDS ── */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin: 28px 0;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .stat-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+    background: var(--xdc);
+    opacity: 0.5;
+  }
+
+  .stat-card.usdc::before { background: var(--usdc); }
+  .stat-card.warn::before { background: var(--warn); }
+
+  .stat-label {
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+
+  .stat-value {
+    font-size: 26px;
+    font-weight: 600;
+    font-family: var(--mono);
+    color: var(--text);
+    letter-spacing: -0.02em;
+  }
+
+  .stat-value.xdc { color: var(--xdc); }
+  .stat-value.usdc { color: #5b9ef5; }
+
+  .stat-delta {
+    font-size: 11px;
+    color: var(--xdc);
+    margin-top: 6px;
+    font-family: var(--mono);
+  }
+
+  .stat-delta.neg { color: var(--danger); }
+
+  /* ── TWO COLUMN ── */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+  }
+
+  /* ── PANEL ── */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .panel-title {
+    font-size: 12px;
+    font-family: var(--mono);
+    font-weight: 600;
+    color: var(--label);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .panel-action {
+    font-size: 11px;
+    color: var(--xdc);
+    cursor: pointer;
+    font-family: var(--mono);
+  }
+
+  /* ── ENDPOINT TABLE ── */
+  .ep-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .ep-table th {
+    text-align: left;
+    font-size: 10px;
+    font-family: var(--mono);
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 500;
+  }
+
+  .ep-table td {
+    padding: 12px 20px;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+
+  .ep-table tr:last-child td { border-bottom: none; }
+
+  .ep-table tr:hover td { background: #ffffff04; }
+
+  .method {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 0.04em;
+  }
+
+  .method.get { background: #1a3a1a; color: #4caf50; }
+  .method.post { background: #2a2a1a; color: #ffc107; }
+
+  .price-tag {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #5b9ef5;
+    background: var(--usdc-dim);
+    border: 1px solid #2775ca30;
+    border-radius: 4px;
+    padding: 2px 7px;
+  }
+
+  .path-code {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--xdc);
+  }
+
+  .calls-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .calls-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    flex: 1;
+    max-width: 80px;
+    overflow: hidden;
+  }
+
+  .calls-bar-fill {
+    height: 100%;
+    background: var(--xdc);
+    border-radius: 2px;
+    transition: width 1s ease;
+  }
+
+  .calls-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    min-width: 30px;
+    text-align: right;
+  }
+
+  /* ── REVENUE CHART ── */
+  .chart-area {
+    padding: 20px;
+    height: 180px;
+    position: relative;
+  }
+
+  svg.chart { width: 100%; height: 100%; }
+
+  /* ── LIVE FEED ── */
+  .feed-list {
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .feed-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    animation: fadeIn 0.4s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateX(-8px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  .feed-item:last-child { border-bottom: none; }
+
+  .feed-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    margin-top: 5px;
+    flex-shrink: 0;
+  }
+
+  .feed-dot.paid { background: var(--xdc); }
+  .feed-dot.free { background: var(--muted); }
+  .feed-dot.err  { background: var(--danger); }
+
+  .feed-path {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--xdc);
+  }
+
+  .feed-meta {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  .feed-amount {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #5b9ef5;
+    flex-shrink: 0;
+  }
+
+  /* ── WALLET SECTION ── */
+  .wallet-section {
+    padding: 20px;
+  }
+
+  .wallet-address {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--xdc);
+    background: var(--xdc-dim);
+    border: 1px solid var(--xdc-mid);
+    border-radius: 6px;
+    padding: 10px 14px;
+    word-break: break-all;
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+
+  .wallet-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .wallet-row:last-child { border-bottom: none; }
+  .wallet-row-label { color: var(--muted); font-size: 12px; }
+  .wallet-row-val { font-family: var(--mono); }
+
+  /* ── DEPLOY GUIDE ── */
+  .deploy-panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 24px;
+    margin-top: 20px;
+  }
+
+  .deploy-steps {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    margin-top: 16px;
+  }
+
+  .deploy-step {
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    position: relative;
+  }
+
+  .step-num {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--xdc);
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .step-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
+  .step-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  /* ── CODE BLOCK ── */
+  .code-block {
+    background: #070909;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: #9cdcfe;
+    white-space: pre;
+    overflow-x: auto;
+    margin-top: 12px;
+    line-height: 1.6;
+  }
+
+  .code-block .comment { color: var(--muted); }
+  .code-block .key { color: #ce9178; }
+  .code-block .val { color: #4ec9b0; }
+
+  /* ── FULL WIDTH PANEL ── */
+  .full-panel {
+    margin-top: 20px;
+  }
+
+  /* ── SCROLLBAR ── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    LENDWATCH XDC &nbsp;/&nbsp; LIVE DASHBOARD
+  </div>
+  <div class="header-right">
+    <div class="status-pill" id="statusPill">
+      <div class="status-pill-dot"></div>
+      <span id="statusText">CONNECTING…</span>
+    </div>
+    <div class="network-badge">XDC MAINNET</div>
+  </div>
+</header>
+
+<main>
+  <div class="page-title">
+    <h1>API Overview</h1>
+    <p>Live stats for LendWatch XDC on xdcai.tech/marketplace · <span id="sinceLabel"></span></p>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Total API Calls</div>
+      <div class="stat-value xdc" id="totalCalls">—</div>
+      <div class="stat-delta" id="paidCalls">—</div>
+    </div>
+    <div class="stat-card usdc">
+      <div class="stat-label">Revenue (since deploy)</div>
+      <div class="stat-value usdc" id="revenue">—</div>
+      <div class="stat-delta">USDC earned via x402</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Unique Callers</div>
+      <div class="stat-value xdc" id="uniqueCallers">—</div>
+      <div class="stat-delta">Distinct agent IPs</div>
+    </div>
+    <div class="stat-card warn">
+      <div class="stat-label">Avg Response Time</div>
+      <div class="stat-value" id="avgMs">—</div>
+      <div class="stat-delta">ms per request</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Endpoint Performance</span>
+        <span class="panel-action" id="refreshLabel">auto-refresh 5s</span>
+      </div>
+      <table class="ep-table">
+        <thead><tr><th>Endpoint</th><th>Price</th><th>Calls</th></tr></thead>
+        <tbody id="endpointTable"><tr><td colspan="3" style="color:var(--muted)">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">
+        <span class="panel-title">Payment Wallet (live on-chain)</span>
+        <span class="panel-action"><a id="explorerLink" href="#" target="_blank" style="color:var(--xdc);text-decoration:none">View on XDCScan →</a></span>
+      </div>
+      <div class="wallet-section">
+        <div class="wallet-address" id="walletAddr">Loading…</div>
+        <div class="wallet-row">
+          <span class="wallet-row-label">USDC Balance (on-chain)</span>
+          <span class="wallet-row-val" id="usdcBalance">—</span>
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-row-label">Revenue since deploy</span>
+          <span class="wallet-row-val" id="revSince">—</span>
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-row-label">Paid / total calls</span>
+          <span class="wallet-row-val" id="paidRatio">—</span>
+        </div>
+        <div class="wallet-row">
+          <span class="wallet-row-label">Tracking since</span>
+          <span class="wallet-row-val" id="trackingSince">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel full-panel">
+    <div class="panel-header">
+      <span class="panel-title">Live Request Feed (last 50)</span>
+      <span class="panel-action" id="feedCount"></span>
+    </div>
+    <div class="feed-list" id="feedList" style="max-height:400px">
+      <div class="feed-item"><div class="feed-dot free"></div><div><div class="feed-path">Waiting for requests…</div><div class="feed-meta">Feed populates as agents call your API</div></div></div>
+    </div>
+  </div>
+</main>
+
+<script>
+const fmt = (n, d=4) => n == null ? '—' : Number(n).toLocaleString(undefined, {maximumFractionDigits: d});
+
+async function refresh() {
+  try {
+    const r = await fetch('/dashboard-stats');
+    const s = await r.json();
+
+    document.getElementById('statusText').textContent = 'LIVE';
+    document.getElementById('sinceLabel').textContent = 'tracking since ' + new Date(s.startedAt).toLocaleString();
+
+    document.getElementById('totalCalls').textContent = fmt(s.totals.calls, 0);
+    document.getElementById('paidCalls').textContent = fmt(s.totals.paidCalls, 0) + ' paid';
+    document.getElementById('revenue').textContent = '$' + fmt(s.totals.revenueUSDC, 4);
+    document.getElementById('uniqueCallers').textContent = fmt(s.totals.uniqueCallers, 0);
+    document.getElementById('avgMs').textContent = s.totals.avgResponseMs != null ? s.totals.avgResponseMs + 'ms' : '—';
+
+    // wallet
+    document.getElementById('walletAddr').textContent = s.wallet.address;
+    document.getElementById('explorerLink').href = 'https://xdcscan.io/address/' + s.wallet.address.replace(/^0x/, 'xdc');
+    document.getElementById('usdcBalance').textContent = s.wallet.usdcBalance != null ? fmt(s.wallet.usdcBalance, 4) + ' USDC' : 'unavailable';
+    document.getElementById('revSince').textContent = '$' + fmt(s.totals.revenueUSDC, 4);
+    document.getElementById('paidRatio').textContent = fmt(s.totals.paidCalls,0) + ' / ' + fmt(s.totals.calls,0);
+    document.getElementById('trackingSince').textContent = new Date(s.startedAt).toLocaleString();
+
+    // endpoint table: merge catalogue (routes) with live counters (endpoints)
+    const live = Object.fromEntries((s.endpoints||[]).map(e => [e.endpoint, e]));
+    const rows = (s.routes||[]).map(rt => {
+      const l = live[rt.endpoint] || { calls: 0, paid: 0, revenue: 0 };
+      return { ...rt, ...l };
+    });
+    const maxCalls = Math.max(...rows.map(r => r.calls), 1);
+    document.getElementById('endpointTable').innerHTML = rows.map(r => {
+      const [method, ...pp] = r.endpoint.split(' ');
+      const pct = (r.calls / maxCalls * 100).toFixed(0);
+      return `<tr>
+        <td><span class="method ${method.toLowerCase()}">${method}</span>&nbsp;<span class="path-code">${pp.join(' ')}</span></td>
+        <td><span class="price-tag">$${r.priceUSDC}</span></td>
+        <td><div class="calls-bar-wrap"><div class="calls-bar"><div class="calls-bar-fill" style="width:${pct}%"></div></div><span class="calls-num">${r.calls}</span></div></td>
+      </tr>`;
+    }).join('');
+
+    // feed
+    const feed = s.feed || [];
+    document.getElementById('feedCount').textContent = feed.length + ' events';
+    if (feed.length) {
+      document.getElementById('feedList').innerHTML = feed.map(f => `
+        <div class="feed-item">
+          <div class="feed-dot ${f.paid ? 'paid' : (f.status >= 400 && f.status !== 402 ? 'err' : 'free')}"></div>
+          <div>
+            <div class="feed-path">${f.method} ${f.path} <span style="color:var(--muted)">→ ${f.status}</span></div>
+            <div class="feed-meta">${f.caller} · ${new Date(f.ts).toLocaleTimeString()} · ${f.ms}ms</div>
+          </div>
+          ${f.paid ? `<div class="feed-amount">+$${f.priceUSDC} USDC</div>` : ''}
+        </div>`).join('');
+    }
+  } catch (e) {
+    document.getElementById('statusText').textContent = 'OFFLINE';
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
