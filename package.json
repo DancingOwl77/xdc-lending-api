@@ -1,0 +1,14 @@
+{
+  "name": "xdc-lending-api",
+  "version": "1.0.0",
+  "description": "x402 pay-per-call lending API for AI agents on XDC Network",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.0",
+    "cors": "^2.8.5",
+    "axios": "^1.7.0"
+  }
+}
