@@ -283,6 +283,7 @@ async function getBestRate(asset) {
 }
 
 // ── FREE ROUTES ───────────────────────────────────────────────────────────────
+app.get('/', (_, res) => res.redirect('/info'));
 app.get('/health', (_, res) => res.json({
   status: 'ok', service: 'XDC Lending API', version: '1.1.0',
   network: 'xdc', timestamp: new Date().toISOString(),
