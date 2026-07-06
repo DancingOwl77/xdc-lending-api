@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.2.0 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.2.1 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -59,59 +59,104 @@ attachStats(app, {
 app.get('/dashboard', (_, res) => res.sendFile(path.join(__dirname, 'dashboard.html')));
 
 // ── x402 MIDDLEWARE ───────────────────────────────────────────────────────────
+function buildRequirements(req, price, description) {
+  // MUST be byte-identical in structure to what /verify and /settle receive
+  return {
+    scheme: 'exact',
+    network: 'xdc',
+    maxAmountRequired: toAtomic(price),
+    resource: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+    description,
+    mimeType: 'application/json',
+    payTo: RECEIVER_WALLET,
+    asset: USDC_XDC,
+    maxTimeoutSeconds: 60,
+    extra: { name: 'USDC', version: '2' },
+  };
+}
+
+async function callFacilitator(step, paymentHeader, paymentRequirements) {
+  // Decode the base64 X-PAYMENT header into its JSON payload
+  let decoded = null;
+  try { decoded = JSON.parse(Buffer.from(paymentHeader, 'base64').toString('utf8')); } catch (_) {}
+
+  // Canonical x402 facilitator body first; alternate encoding as fallback on 400
+  const attempts = [];
+  if (decoded) attempts.push({ x402Version: 1, paymentPayload: decoded, paymentRequirements });
+  attempts.push({ x402Version: 1, paymentHeader, paymentRequirements });
+
+  let lastErr = null;
+  for (const body of attempts) {
+    try {
+      const r = await axios.post(`${FACILITATOR_URL}/${step}`, body, {
+        timeout: 12000,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      return r.data;
+    } catch (e) {
+      lastErr = e;
+      // Only try the alternate encoding on a 400 (bad request shape).
+      if (!e.response || e.response.status !== 400) break;
+    }
+  }
+  const detail = lastErr?.response?.data || lastErr?.message || 'unknown facilitator error';
+  const err = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+  err.facilitatorStatus = lastErr?.response?.status;
+  throw err;
+}
+
 function x402(routeKey) {
   const { price, description } = ROUTES[routeKey];
-  const maxAmountRequired = toAtomic(price);
 
   return async (req, res, next) => {
     const payment = req.headers['x-payment'];
+    const requirements = buildRequirements(req, price, description);
 
     if (!payment) {
-      return res.status(402).json({
-        x402Version: 1,
-        accepts: [{
-          scheme: 'exact',
-          network: 'xdc',
-          maxAmountRequired,
-          resource: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-          description,
-          mimeType: 'application/json',
-          payTo: RECEIVER_WALLET,
-          asset: USDC_XDC,
-          maxTimeoutSeconds: 60,
-          extra: { name: 'USDC', version: '2' },
-        }],
-      });
+      return res.status(402).json({ x402Version: 1, accepts: [requirements] });
     }
 
     try {
-      const body = {
-        x402Version: 1, scheme: 'exact', network: 'xdc',
-        payload: payment,
-        resource: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-        payTo: RECEIVER_WALLET, asset: USDC_XDC,
-        maxAmountRequired, maxTimeoutSeconds: 60,
-        extra: { name: 'USDC', version: '2' },
-      };
-
-      const verifyRes = await axios.post(`${FACILITATOR_URL}/verify`, body, { timeout: 8000 });
-      if (!verifyRes.data?.isValid) {
-        return res.status(402).json({ error: 'Payment invalid', detail: verifyRes.data });
+      // VERIFY
+      const v = await callFacilitator('verify', payment, requirements);
+      const isValid = v?.isValid ?? v?.valid ?? false;
+      if (!isValid) {
+        return res.status(402).json({
+          x402Version: 1,
+          error: 'Payment invalid',
+          invalidReason: v?.invalidReason || v?.reason || null,
+          accepts: [requirements],
+        });
       }
 
-      const settleRes = await axios.post(`${FACILITATOR_URL}/settle`, body, { timeout: 10000 });
+      // SETTLE
+      const s = await callFacilitator('settle', payment, requirements);
+      const settled = s?.success ?? s?.settled ?? Boolean(s?.txHash);
+      if (!settled) {
+        return res.status(402).json({
+          x402Version: 1,
+          error: 'Settlement failed',
+          detail: s || null,
+          accepts: [requirements],
+        });
+      }
 
       res.set('X-Payment-Response', Buffer.from(JSON.stringify({
         success: true,
-        txHash: settleRes.data?.txHash || 'settled',
-        network: 'xdc',
-        amount: maxAmountRequired,
+        txHash: s?.txHash || s?.transaction || 'settled',
+        networkId: 'xdc',
       })).toString('base64'));
 
       next();
     } catch (err) {
-      // SECURITY: never serve paid content on verification failure.
-      return res.status(402).json({ error: 'Payment verification failed', detail: err.message });
+      console.error(`[x402] ${routeKey} facilitator error (status ${err.facilitatorStatus || '?'}):`, err.message);
+      return res.status(402).json({
+        x402Version: 1,
+        error: 'Payment verification failed',
+        detail: err.message,
+        facilitatorStatus: err.facilitatorStatus || null,
+        accepts: [requirements],
+      });
     }
   };
 }
@@ -298,7 +343,7 @@ async function getBestRate(asset) {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.2.0',
+  status: 'ok', service: 'XDC Lending API', version: '1.2.1',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -306,7 +351,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.2.0',
+  version: '1.2.1',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -357,7 +402,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset'), async (req, res) => 
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.2.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.2.1 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
