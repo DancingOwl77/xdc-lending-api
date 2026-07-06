@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.2.1 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.3.0 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -38,14 +38,14 @@ const toAtomic        = (usd) => String(Math.round(usd * 1_000_000));
 
 // ── ROUTE PRICE MAP ───────────────────────────────────────────────────────────
 const ROUTES = {
-  'GET /rates':                 { price: 0.005, description: 'All XDC protocol lending rates' },
-  'GET /rates/:protocol':       { price: 0.003, description: 'Single protocol lending rates' },
-  'GET /collateral':            { price: 0.005, description: 'Collateral assets and LTV ratios' },
-  'GET /position/:wallet':      { price: 0.010, description: 'Wallet loan health and positions' },
-  'POST /simulate/borrow':      { price: 0.010, description: 'Simulate a borrow' },
-  'POST /simulate/liquidation': { price: 0.010, description: 'Simulate liquidation risk' },
-  'GET /liquidations/recent':   { price: 0.008, description: 'Recent liquidation events' },
-  'GET /best-rate/:asset':      { price: 0.005, description: 'Best supply/borrow rate for asset' },
+  'GET /rates':                 { price: 0.0025, description: 'All XDC protocol lending rates' },
+  'GET /rates/:protocol':       { price: 0.0015, description: 'Single protocol lending rates' },
+  'GET /collateral':            { price: 0.0025, description: 'Collateral assets and LTV ratios' },
+  'GET /position/:wallet':      { price: 0.005,  description: 'Wallet loan health and positions' },
+  'POST /simulate/borrow':      { price: 0.005,  description: 'Simulate a borrow' },
+  'POST /simulate/liquidation': { price: 0.005,  description: 'Simulate liquidation risk' },
+  'GET /liquidations/recent':   { price: 0.004,  description: 'Recent liquidation events' },
+  'GET /best-rate/:asset':      { price: 0.0025, description: 'Best supply/borrow rate for asset' },
 };
 
 // ── STATS + DASHBOARD ─────────────────────────────────────────────────────────
@@ -177,6 +177,34 @@ const FALLBACK_RATES = {
   ],
 };
 
+let priceCache = { data: null, fetchedAt: 0 };
+
+async function getLivePrices() {
+  const now = Date.now();
+  if (priceCache.data && now - priceCache.fetchedAt < 5 * 60 * 1000) return priceCache.data;
+  try {
+    const r = await axios.get('https://api.coingecko.com/api/v3/simple/price', {
+      params: { ids: 'xdce-crowd-sale,ethereum,bitcoin,usd-coin,tether', vs_currencies: 'usd' },
+      timeout: 8000,
+    });
+    const d = r.data;
+    const prices = {
+      XDC:  d['xdce-crowd-sale']?.usd ?? null,
+      WXDC: d['xdce-crowd-sale']?.usd ?? null,
+      WETH: d['ethereum']?.usd ?? null,
+      WBTC: d['bitcoin']?.usd ?? null,
+      USDC: d['usd-coin']?.usd ?? 1.0,
+      USDT: d['tether']?.usd ?? 1.0,
+    };
+    if (prices.XDC == null) throw new Error('missing XDC price');
+    priceCache = { data: { prices, source: 'coingecko-live' }, fetchedAt: now };
+    return priceCache.data;
+  } catch (e) {
+    console.warn('[prices] live fetch failed:', e.message);
+    return priceCache.data || { prices: { XDC: 0.028, WXDC: 0.028, WETH: 3500, WBTC: 68000, USDC: 1.0, USDT: 1.0 }, source: 'fallback-snapshot' };
+  }
+}
+
 async function getLendingRates() {
   const now = Date.now();
   if (ratesCache.data && now - ratesCache.fetchedAt < CACHE_TTL) return ratesCache.data;
@@ -262,14 +290,19 @@ function getPosition(wallet) {
   };
 }
 
-function simulateBorrow({ collateralAsset, collateralAmount, borrowAsset, protocol }) {
-  const ltv    = { XDC: 0.65, WETH: 0.70, WBTC: 0.70, USDC: 0.85 }[collateralAsset] || 0.65;
-  const prices = { XDC: 0.16, WETH: 3500, WBTC: 68000, USDC: 1.0 };
-  const colUSD = (prices[collateralAsset] || 1) * collateralAmount;
+async function simulateBorrow({ collateralAsset, collateralAmount, borrowAsset, protocol }) {
+  const ltv = { XDC: 0.65, WXDC: 0.65, WETH: 0.70, WBTC: 0.70, USDC: 0.85 }[collateralAsset] || 0.65;
+  const { prices, source } = await getLivePrices();
+  const colPrice = prices[collateralAsset];
+  if (colPrice == null) {
+    return { error: `Unsupported collateral asset: ${collateralAsset}`, supported: Object.keys(prices) };
+  }
+  const colUSD = colPrice * collateralAmount;
   const maxUSD = colUSD * ltv;
   return {
-    timestamp: new Date().toISOString(), simulation: true,
+    timestamp: new Date().toISOString(), simulation: true, priceSource: source,
     inputs: { collateralAsset, collateralAmount, borrowAsset, protocol },
+    marketPrices: { [collateralAsset]: colPrice, [borrowAsset]: prices[borrowAsset] ?? null },
     result: {
       collateralValueUSD: +colUSD.toFixed(2),
       maxBorrowUSD: +maxUSD.toFixed(2),
@@ -278,7 +311,7 @@ function simulateBorrow({ collateralAsset, collateralAmount, borrowAsset, protoc
       recommendedBorrowUSD: +(maxUSD * 0.75).toFixed(2),
       healthFactorAtMax: 1.18,
       healthFactorAtRecommended: 1.55,
-      liquidationPrice: +((prices[collateralAsset] || 1) * 0.75).toFixed(4),
+      liquidationPrice: +(colPrice * 0.75).toFixed(6),
     },
     warning: maxUSD > 10000 ? 'Large borrow — keep health factor above 1.5' : null,
   };
@@ -343,7 +376,7 @@ async function getBestRate(asset) {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.2.1',
+  status: 'ok', service: 'XDC Lending API', version: '1.3.0',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -351,7 +384,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.2.1',
+  version: '1.3.0',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -382,11 +415,11 @@ app.get('/position/:wallet', x402('GET /position/:wallet'), (req, res) => {
   res.json(getPosition(req.params.wallet));
 });
 
-app.post('/simulate/borrow', x402('POST /simulate/borrow'), (req, res) => {
+app.post('/simulate/borrow', x402('POST /simulate/borrow'), async (req, res) => {
   const { collateralAsset, collateralAmount, borrowAsset } = req.body;
   if (!collateralAsset || !collateralAmount || !borrowAsset)
     return res.status(400).json({ error: 'Missing required fields', required: { collateralAsset: 'XDC|WETH|WBTC|USDC', collateralAmount: 'number', borrowAsset: 'USDC|USDT' } });
-  res.json(simulateBorrow({ ...req.body, collateralAmount: Number(collateralAmount) }));
+  res.json(await simulateBorrow({ ...req.body, collateralAmount: Number(collateralAmount) }));
 });
 
 app.post('/simulate/liquidation', x402('POST /simulate/liquidation'), (req, res) => {
@@ -402,7 +435,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset'), async (req, res) => 
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.2.1 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.3.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
