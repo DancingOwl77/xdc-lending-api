@@ -9,6 +9,8 @@
   "dependencies": {
     "express": "^4.19.0",
     "cors": "^2.8.5",
-    "axios": "^1.7.0"
+    "axios": "^1.7.0",
+    "express-rate-limit": "^7.4.0"
+  }
   }
 }
