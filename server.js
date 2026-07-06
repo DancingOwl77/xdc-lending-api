@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.3.0 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.3.1 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -376,7 +376,7 @@ async function getBestRate(asset) {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.3.0',
+  status: 'ok', service: 'XDC Lending API', version: '1.3.1',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -384,7 +384,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.3.0',
+  version: '1.3.1',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -392,7 +392,7 @@ app.get('/info', (_, res) => res.json({
   },
   services: Object.entries(ROUTES).map(([key, val]) => {
     const [method, path] = [key.split(' ')[0], key.split(' ').slice(1).join(' ')];
-    return { url: `https://xdc-lending-api.onrender.com${path}`, method, priceUSDC: val.price.toFixed(3), description: val.description };
+    return { url: `https://xdc-lending-api.onrender.com${path}`, method, priceUSDC: String(val.price), description: val.description };
   }),
   tags: ['lending', 'defi', 'xdc', 'rates', 'positions', 'liquidations'],
 }));
@@ -435,7 +435,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset'), async (req, res) => 
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.3.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.3.1 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
