@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.1.0 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.2.0 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -12,6 +12,8 @@ const express   = require('express');
 const cors      = require('cors');
 const axios     = require('axios');
 const rateLimit = require('express-rate-limit');
+const path      = require('path');
+const { attachStats } = require('./stats');
 
 const app = express();
 app.set('trust proxy', 1); // trust Render's proxy only (required for correct https + rate limiting)
@@ -45,6 +47,16 @@ const ROUTES = {
   'GET /liquidations/recent':   { price: 0.008, description: 'Recent liquidation events' },
   'GET /best-rate/:asset':      { price: 0.005, description: 'Best supply/borrow rate for asset' },
 };
+
+// ── STATS + DASHBOARD ─────────────────────────────────────────────────────────
+attachStats(app, {
+  routes: Object.entries(ROUTES).map(([k, v]) => ({ endpoint: k, priceUSDC: v.price, description: v.description })),
+  wallet: RECEIVER_WALLET,
+  usdcContract: USDC_XDC,
+  priceOf: (key) => ROUTES[key]?.price || 0,
+});
+
+app.get('/dashboard', (_, res) => res.sendFile(path.join(__dirname, 'dashboard.html')));
 
 // ── x402 MIDDLEWARE ───────────────────────────────────────────────────────────
 function x402(routeKey) {
@@ -284,8 +296,9 @@ async function getBestRate(asset) {
 
 // ── FREE ROUTES ───────────────────────────────────────────────────────────────
 app.get('/', (_, res) => res.redirect('/info'));
+
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.1.0',
+  status: 'ok', service: 'XDC Lending API', version: '1.2.0',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -293,7 +306,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.1.0',
+  version: '1.2.0',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -344,7 +357,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset'), async (req, res) => 
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.1.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.2.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
