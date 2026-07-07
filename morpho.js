@@ -1,6 +1,6 @@
 /**
  * morpho.js — Morpho Blue reader for XDC mainnet.
- * Singleton (same address all chains): 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb
+ * Singleton (same address all chains): 0xEa49B0fE898aF913A3826F9f462eE2cDcb854fD9
  * Markets are read by ID (bytes32). Discover market IDs by scanning CreateMarket events.
  *   market(id) -> (totalSupplyAssets, totalSupplyShares, totalBorrowAssets, totalBorrowShares, lastUpdate, fee)
  *   idToMarketParams(id) -> (loanToken, collateralToken, oracle, irm, lltv)
@@ -8,7 +8,7 @@
  */
 const axios = require('axios');
 const RPC = process.env.XDC_RPC || 'https://rpc.xinfin.network';
-const MORPHO = process.env.MORPHO_SINGLETON || '0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb';
+const MORPHO = process.env.MORPHO_SINGLETON || '0xEa49B0fE898aF913A3826F9f462eE2cDcb854fD9';
 
 const SEL = {
   market:           '0x5c60e39a', // market(bytes32)
