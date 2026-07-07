@@ -449,6 +449,7 @@ app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
   status: 'ok', service: 'XDC Lending API', version: '1.5.1',
+  build: 'usd-positions',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -457,6 +458,7 @@ app.get('/info', (_, res) => res.json({
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
   version: '1.5.1',
+  build: 'usd-positions',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -468,6 +470,14 @@ app.get('/info', (_, res) => res.json({
   }),
   tags: ['lending', 'defi', 'xdc', 'rates', 'positions', 'liquidations'],
 }));
+
+app.get('/silo/position-full', async (req, res) => {
+  const wallet = req.query.wallet;
+  if (!wallet || !/^(0x|xdc)[0-9a-fA-F]{40}$/.test(wallet))
+    return res.status(400).json({ error: 'Provide ?wallet=0x…' });
+  try { res.json(await silo.getWalletPosition(wallet)); }
+  catch (e) { res.status(500).json({ error: 'position read failed', detail: e.message }); }
+});
 
 app.get('/silo/position-test', async (req, res) => {
   const wallet = req.query.wallet;
