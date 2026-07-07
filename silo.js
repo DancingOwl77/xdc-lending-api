@@ -85,6 +85,34 @@ async function getSiloCollateral(){
 }
 
 
+
+// ── PRICE JOIN (v1.5.1) ──────────────────────────────────────────────────────
+let _priceCache = { data: null, at: 0 };
+async function getPrices(){
+  const now = Date.now();
+  if (_priceCache.data && now - _priceCache.at < 5*60*1000) return _priceCache.data;
+  try {
+    const r = await axios.get('https://api.coingecko.com/api/v3/simple/price',
+      { params: { ids: 'xdce-crowd-sale,usd-coin,tether', vs_currencies: 'usd' }, timeout: 8000 });
+    const d = r.data;
+    const p = {
+      WXDC: d['xdce-crowd-sale']?.usd ?? null,
+      XDC:  d['xdce-crowd-sale']?.usd ?? null,
+      USDC: d['usd-coin']?.usd ?? 1.0,
+      USDT: d['tether']?.usd ?? 1.0,
+    };
+    _priceCache = { data: { prices: p, source: 'coingecko' }, at: now };
+    return _priceCache.data;
+  } catch(e){
+    return _priceCache.data || { prices: { WXDC:0.028, XDC:0.028, USDC:1.0, USDT:1.0 }, source: 'fallback' };
+  }
+}
+function priceOf(symbol, prices){
+  if (symbol in prices) return prices[symbol];
+  if (symbol.startsWith('W') && symbol.slice(1) in prices) return prices[symbol.slice(1)];
+  return null;
+}
+
 // ── POSITION READS (v1.5) — verified ISiloConfig.ConfigData layout ──────────
 // word2 silo(=collateral ERC4626 share), word3 asset, word4 protectedShareToken,
 // word6 debtShareToken, word9 interestRateModel.
@@ -116,8 +144,9 @@ async function sharesToAssets(vault, shares){
 async function getWalletPosition(wallet){
   const silosHex = await ethCall(MARKET, SEL.getSilos);
   const silos = [addrOf(word(silosHex,0)), addrOf(word(silosHex,1))];
+  const { prices, source: priceSource } = await getPrices();
 
-  let totalCollateralUSDish = 0, totalDebtUSDish = 0;
+  let totalCollateralUSD = 0, totalDebtUSD = 0, weightedLtSum = 0;
   const legs = [];
 
   for (const siloAddr of silos){
@@ -128,52 +157,51 @@ async function getWalletPosition(wallet){
     const d = 10n**BigInt(decimals);
     const num = (v)=> Number(v*1000000n/(d||1n))/1000000;
 
-    // collateral = ERC4626 shares of the silo itself
     const colShares = await balanceOf(cfg.silo, wallet);
-    const colAssets = await sharesToAssets(cfg.silo, colShares);
-    // protected = non-borrowable collateral share token
+    const colAssets = num(await sharesToAssets(cfg.silo, colShares));
     const protShares = await balanceOf(cfg.protectedShareToken, wallet);
-    const protAssets = await sharesToAssets(cfg.protectedShareToken, protShares);
-    // debt = debt share token (1:1-ish; convertToAssets may not exist on debt token, fallback = shares)
+    const protAssets = num(await sharesToAssets(cfg.protectedShareToken, protShares));
     const debtShares = await balanceOf(cfg.debtShareToken, wallet);
-    const debtAssets = await sharesToAssets(cfg.debtShareToken, debtShares);
+    const debtAssets = num(await sharesToAssets(cfg.debtShareToken, debtShares));
 
-    const collateral = num(colAssets) + num(protAssets);
-    const debt = num(debtAssets);
-    if (collateral > 0 || debt > 0){
+    const collateralUnits = colAssets + protAssets;
+    if (collateralUnits > 0 || debtAssets > 0){
+      const px = priceOf(symbol, prices);
+      const colUSD  = px != null ? collateralUnits * px : null;
+      const debtUSD = px != null ? debtAssets * px : null;
+
       legs.push({
-        asset: symbol, silo: siloAddr,
-        collateralAssets: +num(colAssets).toFixed(6),
-        protectedAssets: +num(protAssets).toFixed(6),
-        debtAssets: +debt.toFixed(6),
+        asset: symbol, silo: siloAddr, priceUSD: px,
+        collateralAssets: +colAssets.toFixed(6),
+        protectedAssets: +protAssets.toFixed(6),
+        debtAssets: +debtAssets.toFixed(6),
+        collateralValueUSD: colUSD != null ? +colUSD.toFixed(2) : null,
+        debtValueUSD: debtUSD != null ? +debtUSD.toFixed(2) : null,
         maxLtv: cfg.maxLtv, liquidationThreshold: cfg.liquidationThreshold,
       });
-      // NOTE: without a price oracle join these are per-asset units, not USD.
-      // We treat stable (USDC) ~1 and leave others as-is for a rough health proxy.
-      totalCollateralUSDish += collateral;
-      totalDebtUSDish += debt;
+      if (colUSD != null){ totalCollateralUSD += colUSD; weightedLtSum += colUSD * cfg.liquidationThreshold; }
+      if (debtUSD != null){ totalDebtUSD += debtUSD; }
     }
   }
 
   const hasPosition = legs.length > 0;
-  // health factor proxy using liquidation threshold of the collateral leg(s)
-  let healthFactor = null;
-  if (hasPosition && totalDebtUSDish > 0){
-    const lt = legs.find(l=>l.collateralAssets>0||l.protectedAssets>0)?.liquidationThreshold || 0.6;
-    healthFactor = +((totalCollateralUSDish * lt) / totalDebtUSDish).toFixed(3);
-  }
+  const avgLt = totalCollateralUSD > 0 ? weightedLtSum / totalCollateralUSD : 0;
+  // real health factor: (collateral USD * weighted liquidation threshold) / debt USD
+  const healthFactor = (hasPosition && totalDebtUSD > 0)
+    ? +((totalCollateralUSD * avgLt) / totalDebtUSD).toFixed(3) : null;
 
   return {
     timestamp: new Date().toISOString(),
     wallet, network: 'XDC Mainnet', protocol: 'Silo Finance V3',
-    market: MARKET, dataSource: 'silo-v3-onchain',
+    market: MARKET, dataSource: 'silo-v3-onchain', priceSource,
     hasPosition,
     summary: hasPosition ? {
-      totalCollateral: +totalCollateralUSDish.toFixed(6),
-      totalDebt: +totalDebtUSDish.toFixed(6),
+      totalCollateralUSD: +totalCollateralUSD.toFixed(2),
+      totalDebtUSD: +totalDebtUSD.toFixed(2),
+      netValueUSD: +(totalCollateralUSD - totalDebtUSD).toFixed(2),
       healthFactor,
       liquidationRisk: healthFactor==null ? 'NONE' : healthFactor<1.1 ? 'HIGH' : healthFactor<1.4 ? 'MEDIUM' : 'LOW',
-      note: 'Amounts are in native asset units. USD valuation requires a price join (roadmap). USDC≈$1.',
+      alerts: healthFactor!=null && healthFactor<1.3 ? ['Health factor below 1.3 — consider adding collateral or repaying'] : [],
     } : null,
     positions: legs,
     message: hasPosition ? undefined : 'No open Silo position found for this wallet in the XDC/USDC market.',
