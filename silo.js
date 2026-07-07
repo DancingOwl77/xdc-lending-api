@@ -85,62 +85,116 @@ async function getSiloCollateral(){
 }
 
 
-// ── POSITION READS (v1.5) ────────────────────────────────────────────────────
-// From the verified getConfig struct, the share tokens sit at:
-//   word5 = protectedShareToken, word6 = collateralShareToken, word7 = debtShareToken? 
-// We VERIFY positions rather than assume: diagnose reads symbols so we can label them.
-const PSEL = {
-  balanceOf:'0x70a08231', convertToAssets:'0x07a2d13a', symbol:'0x95d89b41',
-  decimals:'0x313ce567', name:'0x06fdde03',
-};
+// ── POSITION READS (v1.5) — verified ISiloConfig.ConfigData layout ──────────
+// word2 silo(=collateral ERC4626 share), word3 asset, word4 protectedShareToken,
+// word6 debtShareToken, word9 interestRateModel.
+const PSEL = { balanceOf:'0x70a08231', convertToAssets:'0x07a2d13a', symbol:'0x95d89b41', decimals:'0x313ce567' };
 
-async function readShareTokensFromConfig(silo){
+async function readConfigFull(silo){
   const raw = await ethCall(MARKET, SEL.getConfig + argAddr(silo));
-  // From decoded struct: collateral silo/tokens live in words 5-8.
-  // word5 = protected share token, word6 = collateral share token, word7 = debt share token
   return {
-    word5: addrOf(word(raw,5)),
-    word6: addrOf(word(raw,6)),
-    word7: addrOf(word(raw,7)),
-    word8: addrOf(word(raw,8)),
+    silo:                addrOf(word(raw,2)),
+    asset:               addrOf(word(raw,3)),
+    protectedShareToken: addrOf(word(raw,4)),
+    debtShareToken:      addrOf(word(raw,6)),
+    interestRateModel:   addrOf(word(raw,9)),
+    maxLtv:              Number(big(word(raw,10)))/1e18,
+    liquidationThreshold:Number(big(word(raw,11)))/1e18,
+    liquidationFee:      Number(big(word(raw,13)))/1e18,
   };
 }
 
-async function tokenMeta(addr){
-  let symbol='?',decimals=18,name='?';
-  try{symbol=decodeString(await ethCall(addr,PSEL.symbol))||'?';}catch(_){}
-  try{decimals=Number(big(await ethCall(addr,PSEL.decimals)));}catch(_){}
-  try{name=decodeString(await ethCall(addr,PSEL.name))||'?';}catch(_){}
-  return {address:addr,symbol,decimals,name};
+async function balanceOf(token, wallet){
+  try { return big(await ethCall(token, PSEL.balanceOf + argAddr(wallet))); } catch(_) { return 0n; }
+}
+async function sharesToAssets(vault, shares){
+  if (shares === 0n) return 0n;
+  try { return big(await ethCall(vault, PSEL.convertToAssets + argUint(shares))); } catch(_) { return shares; }
 }
 
-// Diagnostic: given a wallet, show its balances across all candidate share tokens per silo,
-// with token symbols/names so we can identify collateral vs protected vs debt.
+// Read a wallet's full position across both silos of the market.
+async function getWalletPosition(wallet){
+  const silosHex = await ethCall(MARKET, SEL.getSilos);
+  const silos = [addrOf(word(silosHex,0)), addrOf(word(silosHex,1))];
+
+  let totalCollateralUSDish = 0, totalDebtUSDish = 0;
+  const legs = [];
+
+  for (const siloAddr of silos){
+    const cfg = await readConfigFull(siloAddr);
+    let symbol='?', decimals=18;
+    try{ symbol = decodeString(await ethCall(cfg.asset, PSEL.symbol))||'?'; }catch(_){}
+    try{ decimals = Number(big(await ethCall(cfg.asset, PSEL.decimals))); }catch(_){}
+    const d = 10n**BigInt(decimals);
+    const num = (v)=> Number(v*1000000n/(d||1n))/1000000;
+
+    // collateral = ERC4626 shares of the silo itself
+    const colShares = await balanceOf(cfg.silo, wallet);
+    const colAssets = await sharesToAssets(cfg.silo, colShares);
+    // protected = non-borrowable collateral share token
+    const protShares = await balanceOf(cfg.protectedShareToken, wallet);
+    const protAssets = await sharesToAssets(cfg.protectedShareToken, protShares);
+    // debt = debt share token (1:1-ish; convertToAssets may not exist on debt token, fallback = shares)
+    const debtShares = await balanceOf(cfg.debtShareToken, wallet);
+    const debtAssets = await sharesToAssets(cfg.debtShareToken, debtShares);
+
+    const collateral = num(colAssets) + num(protAssets);
+    const debt = num(debtAssets);
+    if (collateral > 0 || debt > 0){
+      legs.push({
+        asset: symbol, silo: siloAddr,
+        collateralAssets: +num(colAssets).toFixed(6),
+        protectedAssets: +num(protAssets).toFixed(6),
+        debtAssets: +debt.toFixed(6),
+        maxLtv: cfg.maxLtv, liquidationThreshold: cfg.liquidationThreshold,
+      });
+      // NOTE: without a price oracle join these are per-asset units, not USD.
+      // We treat stable (USDC) ~1 and leave others as-is for a rough health proxy.
+      totalCollateralUSDish += collateral;
+      totalDebtUSDish += debt;
+    }
+  }
+
+  const hasPosition = legs.length > 0;
+  // health factor proxy using liquidation threshold of the collateral leg(s)
+  let healthFactor = null;
+  if (hasPosition && totalDebtUSDish > 0){
+    const lt = legs.find(l=>l.collateralAssets>0||l.protectedAssets>0)?.liquidationThreshold || 0.6;
+    healthFactor = +((totalCollateralUSDish * lt) / totalDebtUSDish).toFixed(3);
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    wallet, network: 'XDC Mainnet', protocol: 'Silo Finance V3',
+    market: MARKET, dataSource: 'silo-v3-onchain',
+    hasPosition,
+    summary: hasPosition ? {
+      totalCollateral: +totalCollateralUSDish.toFixed(6),
+      totalDebt: +totalDebtUSDish.toFixed(6),
+      healthFactor,
+      liquidationRisk: healthFactor==null ? 'NONE' : healthFactor<1.1 ? 'HIGH' : healthFactor<1.4 ? 'MEDIUM' : 'LOW',
+      note: 'Amounts are in native asset units. USD valuation requires a price join (roadmap). USDC≈$1.',
+    } : null,
+    positions: legs,
+    message: hasPosition ? undefined : 'No open Silo position found for this wallet in the XDC/USDC market.',
+  };
+}
+
+// keep a lightweight position diagnostic for debugging (labels all candidate tokens)
 async function diagnosePosition(wallet){
-  const out={wallet,market:MARKET,timestamp:new Date().toISOString(),silos:[]};
   const silosHex=await ethCall(MARKET,SEL.getSilos);
   const silos=[addrOf(word(silosHex,0)),addrOf(word(silosHex,1))];
-  for(const silo of silos){
-    const st=await readShareTokensFromConfig(silo);
-    const cfg=await readConfig(silo);
-    const g={silo,asset:cfg.asset,candidateTokens:[]};
-    // also treat the silo itself as an ERC4626 collateral vault
-    const candidates={ silo_self:silo, word5:st.word5, word6:st.word6, word7:st.word7, word8:st.word8 };
-    for(const [label,addr] of Object.entries(candidates)){
-      if(!addr || big('0x'+addr.slice(2))===0n){ g.candidateTokens.push({label,address:addr,skipped:true}); continue; }
-      const meta=await tokenMeta(addr);
-      let bal='0';
-      try{ bal=big(await ethCall(addr,PSEL.balanceOf+argAddr(wallet))).toString(); }catch(e){ bal='err:'+e.message; }
-      let assets=null;
-      try{ if(bal!=='0'&&!bal.startsWith('err')) assets=big(await ethCall(addr,PSEL.convertToAssets+argUint(BigInt(bal)))).toString(); }catch(_){}
-      g.candidateTokens.push({label,...meta,shareBalance:bal,assets});
-    }
-    out.silos.push(g);
+  const out={wallet,market:MARKET,silos:[]};
+  for(const s of silos){
+    const cfg=await readConfigFull(s);
+    const read=async(t)=>({token:t,shares:(await balanceOf(t,wallet)).toString()});
+    out.silos.push({silo:s,asset:cfg.asset,
+      collateralShare:await read(cfg.silo),
+      protectedShare:await read(cfg.protectedShareToken),
+      debtShare:await read(cfg.debtShareToken)});
   }
-  out.note='Identify which token label shows a nonzero balance for a wallet with a known position. symbol/name reveal collateral(s...) vs protected(sp...) vs debt(d...).';
   return out;
 }
 
-
 async function diagnose(){ return getSiloMarket(); }
-module.exports={getSiloMarket,getSiloRates,getSiloCollateral,diagnose,diagnosePosition,MARKET,RPC};
+module.exports={getSiloMarket,getSiloRates,getSiloCollateral,getWalletPosition,diagnose,diagnosePosition,MARKET,RPC};
