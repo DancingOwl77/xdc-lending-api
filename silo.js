@@ -224,5 +224,147 @@ async function diagnosePosition(wallet){
   return out;
 }
 
+
+// ── LIQUIDATION EVENTS (v1.6) ────────────────────────────────────────────────
+// Scan eth_getLogs for Silo liquidation events on both silos. XDC RPC may cap
+// block ranges, so we chunk. Multiple candidate topics are queried to be robust.
+const LIQ_TOPICS = {
+  'Liquidate':      '0xfb11c8f5ae143bb22e8f2f65f3c712f0647059d53bdb600cdbed22ed7bb0ea50',
+  'LiquidationCall':'0xb4c187880b81d714cba477ba1c48ef4b26e2661ebd03f7b442dd03ae89c61dfa',
+  'Liquidation':    '0x4ecae3269f800df64b16cb9f6f8b0b507018888521d1cff0841823e44bc0b00d',
+};
+
+async function ethBlockNumber(){
+  const r=await axios.post(RPC,{jsonrpc:'2.0',id:1,method:'eth_blockNumber',params:[]},{timeout:10000,headers:{'Content-Type':'application/json'}});
+  return parseInt(r.data.result,16);
+}
+async function getLogs(address, topic, fromBlock, toBlock){
+  const r=await axios.post(RPC,{jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[{
+    address, topics:[topic],
+    fromBlock:'0x'+fromBlock.toString(16), toBlock:'0x'+toBlock.toString(16),
+  }]},{timeout:15000,headers:{'Content-Type':'application/json'}});
+  if(r.data.error) throw new Error(r.data.error.message||JSON.stringify(r.data.error));
+  return r.data.result||[];
+}
+
+let liqCache={data:null,at:0}; const LIQ_TTL=5*60*1000;
+
+async function getRecentLiquidations(lookbackBlocks=200000, chunkSize=5000){
+  const now=Date.now();
+  if(liqCache.data && now-liqCache.at<LIQ_TTL) return liqCache.data;
+
+  const silosHex=await ethCall(MARKET,SEL.getSilos);
+  const silos=[addrOf(word(silosHex,0)),addrOf(word(silosHex,1))];
+  const latest=await ethBlockNumber();
+  const start=Math.max(0, latest-lookbackBlocks);
+
+  const events=[];
+  let scannedChunks=0, rangeCapped=false;
+
+  outer:
+  for(const silo of silos){
+    for(const [name,topic] of Object.entries(LIQ_TOPICS)){
+      let from=start;
+      while(from<=latest){
+        const to=Math.min(from+chunkSize-1, latest);
+        try{
+          const logs=await getLogs(silo, topic, from, to);
+          scannedChunks++;
+          for(const log of logs){
+            events.push({
+              event:name, silo, txHash:log.transactionHash,
+              block:parseInt(log.blockNumber,16),
+              topics:log.topics, dataPreview:(log.data||'0x').slice(0,66),
+            });
+          }
+        }catch(e){
+          // XDC RPC likely capped the range — shrink and note it
+          rangeCapped=true;
+          if(chunkSize>1000){ chunkSize=1000; continue; }
+        }
+        from=to+1;
+        if(scannedChunks>120) { rangeCapped=true; break outer; } // safety cap
+      }
+    }
+  }
+
+  events.sort((a,b)=>b.block-a.block);
+  const out={
+    timestamp:new Date().toISOString(),
+    network:'XDC Mainnet', protocol:'Silo Finance V3', market:MARKET,
+    dataSource:'silo-v3-onchain-logs',
+    scannedBlocks:{from:start,to:latest,lookbackBlocks},
+    rangeCappedByRPC:rangeCapped,
+    totalLiquidations:events.length,
+    events:events.slice(0,50),
+    note: events.length===0
+      ? 'No liquidation events found in the scanned range. Silo XDC market is new and positions are currently healthy.'
+      : undefined,
+  };
+  liqCache={data:out,at:now};
+  return out;
+}
+
+
+
+// ── MULTI-MARKET DISCOVERY (v1.7) ────────────────────────────────────────────
+const DSEL = {
+  siloId:            '0xe096017c', // siloId() on the config
+  factory:           '0xc45a0155', // factory()
+  siloFactory:       '0x42456f35', // siloFactory()
+  getNextSiloId:     '0x49f33f2e', // getNextSiloId() on factory
+  idToSiloConfig:    '0xde9bfd06', // idToSiloConfig(uint256) on factory
+};
+
+async function tryRead(label,to,data,decode){
+  try{ const raw=await ethCall(to,data); return {label,ok:true,value:decode?decode(raw):raw, raw:raw.slice(0,80)}; }
+  catch(e){ return {label,ok:false,error:e.message}; }
+}
+
+async function discoverMarkets(){
+  const out={knownMarket:MARKET,timestamp:new Date().toISOString(),steps:[]};
+
+  // 1. find the factory — try on the market/config
+  let factory=null;
+  for(const [name,s] of [['factory()',DSEL.factory],['siloFactory()',DSEL.siloFactory]]){
+    const r=await tryRead('config.'+name,MARKET,s,(x)=>addrOf(x));
+    out.steps.push(r);
+    if(r.ok && r.value && big('0x'+r.value.slice(2))!==0n){ factory=r.value; out.factory=factory; break; }
+  }
+
+  // 2. get this market's siloId (helps confirm the factory relationship)
+  out.steps.push(await tryRead('config.siloId()',MARKET,DSEL.siloId,(x)=>big(x).toString()));
+
+  // 3. if we have a factory, enumerate markets
+  if(factory){
+    const nextIdR=await tryRead('factory.getNextSiloId()',factory,DSEL.getNextSiloId,(x)=>Number(big(x)));
+    out.steps.push(nextIdR);
+    if(nextIdR.ok){
+      const nextId=nextIdR.value;
+      out.totalMarketsHint=nextId-1;
+      out.markets=[];
+      // enumerate idToSiloConfig(1..nextId-1)
+      for(let id=1; id<nextId && id<=25; id++){
+        const cfgR=await tryRead('idToSiloConfig('+id+')',factory,DSEL.idToSiloConfig+id.toString(16).padStart(64,'0'),(x)=>addrOf(x));
+        if(cfgR.ok && cfgR.value && big('0x'+cfgR.value.slice(2))!==0n){
+          // read the two assets of this market for labeling
+          try{
+            const silosHex=await ethCall(cfgR.value,SEL.getSilos);
+            const s0=addrOf(word(silosHex,0)), s1=addrOf(word(silosHex,1));
+            const a0=addrOf(await ethCall(s0,SEL.asset)), a1=addrOf(await ethCall(s1,SEL.asset));
+            let sym0='?',sym1='?';
+            try{sym0=decodeString(await ethCall(a0,SEL.symbol))||'?';}catch(_){}
+            try{sym1=decodeString(await ethCall(a1,SEL.symbol))||'?';}catch(_){}
+            out.markets.push({id,config:cfgR.value,pair:sym0+'/'+sym1,silo0:s0,silo1:s1});
+          }catch(e){ out.markets.push({id,config:cfgR.value,error:e.message}); }
+        }
+      }
+    }
+  }
+  out.note='Enumerates all Silo markets on XDC via factory idToSiloConfig. Each has its own rates/collateral.';
+  return out;
+}
+
+
 async function diagnose(){ return getSiloMarket(); }
-module.exports={getSiloMarket,getSiloRates,getSiloCollateral,getWalletPosition,diagnose,diagnosePosition,MARKET,RPC};
+module.exports={getSiloMarket,getSiloRates,getSiloCollateral,getWalletPosition,getRecentLiquidations,discoverMarkets,diagnose,diagnosePosition,MARKET,RPC};
