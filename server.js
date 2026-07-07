@@ -16,6 +16,7 @@ const path      = require('path');
 const { attachStats } = require('./stats');
 const silo = require('./silo');
 const primefi = require('./primefi');
+const fathom = require('./fathom');
 
 const app = express();
 app.set('trust proxy', 1); // trust Render's proxy only (required for correct https + rate limiting)
@@ -495,6 +496,11 @@ app.get('/silo/position-test', async (req, res) => {
 app.get('/silo/markets', async (_, res) => {
   try { res.json(await silo.discoverMarkets()); }
   catch (e) { res.status(500).json({ error: 'discovery failed', detail: e.message }); }
+});
+
+app.get('/fathom/test', async (_, res) => {
+  try { res.json(await fathom.diagnose()); }
+  catch (e) { res.status(500).json({ error: 'fathom diagnostic failed', detail: e.message }); }
 });
 
 app.get('/primefi/test', async (_, res) => {
