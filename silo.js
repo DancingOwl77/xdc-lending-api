@@ -314,7 +314,7 @@ const DSEL = {
 };
 const NEWSILO_TOPICS = [
   '0x3d6b896c73b628ec6ba0bdfe3cdee1356ea2af31af2a97bbd6b532ca6fa00acb', // NewSilo(6 addr)
-  '0x1ace92e7879bfd47a1af11d9fd41b3e733b667f243a017aad1a6e614881528d9', // NewSilo(4 addr)
+  '0xba4615060c12e2e644247004caf6bb12bb1a30e2b868ab76b87eb8aff726aac7', // NewSilo(7 addr)
 ];
 
 async function tryRead(label,to,data,decode){
@@ -346,21 +346,49 @@ async function discoverMarkets(){
     out.steps.push(await tryRead('silo0.siloId()',silo0,DSEL.siloId,(x)=>big(x).toString()));
   }catch(e){ out.steps.push({label:'getSilos',ok:false,error:e.message}); }
 
-  // If we found a factory, enumerate via idToSiloConfig
+  // Found factory. XDC markets are identified by scanning NewSilo events emitted
+  // by THIS factory on THIS chain (idToSiloConfig uses global IDs, not reliable here).
   if(factory){
-    const nextR=await tryRead('factory.getNextSiloId()',factory,DSEL.getNextSiloId,(x)=>Number(big(x)));
-    out.steps.push(nextR);
-    if(nextR.ok){
-      out.markets=[];
-      for(let id=1; id<nextR.value && id<=30; id++){
-        const c=await tryRead('id'+id,factory,DSEL.idToSiloConfig+id.toString(16).padStart(64,'0'),(x)=>addrOf(x));
-        if(c.ok && c.value && big('0x'+c.value.slice(2))!==0n){
-          out.markets.push(await labelMarket(id,c.value));
+    out.steps.push(await tryRead('factory.getNextSiloId()',factory,DSEL.getNextSiloId,(x)=>Number(big(x))));
+    try{
+      const latest=await ethBlockNumberD();
+      const configs=new Set();
+      let chunksScanned=0, capped=false;
+      for(const topic of NEWSILO_TOPICS){
+        let from=0, chunk=100000; // Silo on XDC is recent; scan from genesis-ish in big chunks
+        // start scan from a reasonable recent window first (last ~3M blocks), widen if empty
+        from=Math.max(0, latest-3000000);
+        while(from<=latest){
+          const to=Math.min(from+chunk-1,latest);
+          try{
+            const logs=await getLogsD(factory,topic,from,to);
+            chunksScanned++;
+            for(const l of logs){
+              // last data word is siloConfig for both event shapes
+              const dw=(l.data||'0x').replace(/^0x/,'');
+              const n=Math.floor(dw.length/64);
+              if(n>=1) configs.add(addrOf('0x'+dw.slice((n-1)*64,n*64)));
+              // also the indexed topics may carry addresses
+              (l.topics||[]).slice(1).forEach(t=>configs.add(addrOf(t)));
+            }
+          }catch(e){ if(chunk>10000){chunk=10000;continue;} capped=true; }
+          from=to+1;
+          if(chunksScanned>150){capped=true;break;}
         }
       }
-      out.discoveredVia='factory.idToSiloConfig';
-      out.note='All Silo markets enumerated from factory.'; return out;
-    }
+      out.rangeCapped=capped;
+      out.candidatesFound=configs.size;
+      out.markets=[]; let id=0;
+      for(const cand of [...configs]){
+        try{ await ethCall(cand,SEL.getSilos); out.markets.push(await labelMarket(++id,cand)); }catch(_){}
+      }
+      // always include the known market
+      if(!out.markets.find(m=>m.config?.toLowerCase()===MARKET.toLowerCase())){
+        out.markets.unshift(await labelMarket(0,MARKET));
+      }
+      out.discoveredVia='NewSilo-event-scan';
+      out.note='Silo markets on XDC found via factory NewSilo events.'; return out;
+    }catch(e){ out.steps.push({label:'eventScan',ok:false,error:e.message}); }
     // factory found but no idToSiloConfig — scan NewSilo events from the factory
     try{
       const latest=await ethBlockNumberD();
