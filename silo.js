@@ -309,62 +309,103 @@ async function getRecentLiquidations(lookbackBlocks=200000, chunkSize=5000){
 
 // ── MULTI-MARKET DISCOVERY (v1.7) ────────────────────────────────────────────
 const DSEL = {
-  siloId:            '0xe096017c', // siloId() on the config
-  factory:           '0xc45a0155', // factory()
-  siloFactory:       '0x42456f35', // siloFactory()
-  getNextSiloId:     '0x49f33f2e', // getNextSiloId() on factory
-  idToSiloConfig:    '0xde9bfd06', // idToSiloConfig(uint256) on factory
+  factory:'0xc45a0155', siloId:'0xe096017c', config:'0x79502c55', siloConfig:'0xd714fd19',
+  getNextSiloId:'0x49f33f2e', idToSiloConfig:'0xde9bfd06',
 };
+const NEWSILO_TOPICS = [
+  '0x3d6b896c73b628ec6ba0bdfe3cdee1356ea2af31af2a97bbd6b532ca6fa00acb', // NewSilo(6 addr)
+  '0x1ace92e7879bfd47a1af11d9fd41b3e733b667f243a017aad1a6e614881528d9', // NewSilo(4 addr)
+];
 
 async function tryRead(label,to,data,decode){
-  try{ const raw=await ethCall(to,data); return {label,ok:true,value:decode?decode(raw):raw, raw:raw.slice(0,80)}; }
+  try{ const raw=await ethCall(to,data); return {label,ok:true,value:decode?decode(raw):raw}; }
   catch(e){ return {label,ok:false,error:e.message}; }
+}
+async function ethBlockNumberD(){
+  const r=await axios.post(RPC,{jsonrpc:'2.0',id:1,method:'eth_blockNumber',params:[]},{timeout:10000,headers:{'Content-Type':'application/json'}});
+  return parseInt(r.data.result,16);
+}
+async function getLogsD(address,topic,fromBlock,toBlock){
+  const r=await axios.post(RPC,{jsonrpc:'2.0',id:1,method:'eth_getLogs',params:[{address,topics:[topic],fromBlock:'0x'+fromBlock.toString(16),toBlock:'0x'+toBlock.toString(16)}]},{timeout:15000,headers:{'Content-Type':'application/json'}});
+  if(r.data.error) throw new Error(r.data.error.message); return r.data.result||[];
 }
 
 async function discoverMarkets(){
   const out={knownMarket:MARKET,timestamp:new Date().toISOString(),steps:[]};
 
-  // 1. find the factory — try on the market/config
+  // Get the two silos of the known market, then ask each silo for its factory()
   let factory=null;
-  for(const [name,s] of [['factory()',DSEL.factory],['siloFactory()',DSEL.siloFactory]]){
-    const r=await tryRead('config.'+name,MARKET,s,(x)=>addrOf(x));
-    out.steps.push(r);
-    if(r.ok && r.value && big('0x'+r.value.slice(2))!==0n){ factory=r.value; out.factory=factory; break; }
-  }
+  try{
+    const silosHex=await ethCall(MARKET,SEL.getSilos);
+    const silo0=addrOf(word(silosHex,0));
+    out.knownSilos=[silo0,addrOf(word(silosHex,1))];
+    const fR=await tryRead('silo0.factory()',silo0,DSEL.factory,(x)=>addrOf(x));
+    out.steps.push(fR);
+    if(fR.ok && fR.value && big('0x'+fR.value.slice(2))!==0n){ factory=fR.value; out.factory=factory; }
+    // also try siloId on the silo
+    out.steps.push(await tryRead('silo0.siloId()',silo0,DSEL.siloId,(x)=>big(x).toString()));
+  }catch(e){ out.steps.push({label:'getSilos',ok:false,error:e.message}); }
 
-  // 2. get this market's siloId (helps confirm the factory relationship)
-  out.steps.push(await tryRead('config.siloId()',MARKET,DSEL.siloId,(x)=>big(x).toString()));
-
-  // 3. if we have a factory, enumerate markets
+  // If we found a factory, enumerate via idToSiloConfig
   if(factory){
-    const nextIdR=await tryRead('factory.getNextSiloId()',factory,DSEL.getNextSiloId,(x)=>Number(big(x)));
-    out.steps.push(nextIdR);
-    if(nextIdR.ok){
-      const nextId=nextIdR.value;
-      out.totalMarketsHint=nextId-1;
+    const nextR=await tryRead('factory.getNextSiloId()',factory,DSEL.getNextSiloId,(x)=>Number(big(x)));
+    out.steps.push(nextR);
+    if(nextR.ok){
       out.markets=[];
-      // enumerate idToSiloConfig(1..nextId-1)
-      for(let id=1; id<nextId && id<=25; id++){
-        const cfgR=await tryRead('idToSiloConfig('+id+')',factory,DSEL.idToSiloConfig+id.toString(16).padStart(64,'0'),(x)=>addrOf(x));
-        if(cfgR.ok && cfgR.value && big('0x'+cfgR.value.slice(2))!==0n){
-          // read the two assets of this market for labeling
-          try{
-            const silosHex=await ethCall(cfgR.value,SEL.getSilos);
-            const s0=addrOf(word(silosHex,0)), s1=addrOf(word(silosHex,1));
-            const a0=addrOf(await ethCall(s0,SEL.asset)), a1=addrOf(await ethCall(s1,SEL.asset));
-            let sym0='?',sym1='?';
-            try{sym0=decodeString(await ethCall(a0,SEL.symbol))||'?';}catch(_){}
-            try{sym1=decodeString(await ethCall(a1,SEL.symbol))||'?';}catch(_){}
-            out.markets.push({id,config:cfgR.value,pair:sym0+'/'+sym1,silo0:s0,silo1:s1});
-          }catch(e){ out.markets.push({id,config:cfgR.value,error:e.message}); }
+      for(let id=1; id<nextR.value && id<=30; id++){
+        const c=await tryRead('id'+id,factory,DSEL.idToSiloConfig+id.toString(16).padStart(64,'0'),(x)=>addrOf(x));
+        if(c.ok && c.value && big('0x'+c.value.slice(2))!==0n){
+          out.markets.push(await labelMarket(id,c.value));
         }
       }
+      out.discoveredVia='factory.idToSiloConfig';
+      out.note='All Silo markets enumerated from factory.'; return out;
     }
+    // factory found but no idToSiloConfig — scan NewSilo events from the factory
+    try{
+      const latest=await ethBlockNumberD();
+      const evMarkets=new Set();
+      for(const topic of NEWSILO_TOPICS){
+        let from=Math.max(0,latest-2000000), chunk=50000;
+        while(from<=latest){
+          const to=Math.min(from+chunk-1,latest);
+          try{
+            const logs=await getLogsD(factory,topic,from,to);
+            for(const l of logs){
+              // NewSilo event data usually contains the config address in a topic or data word
+              if(l.topics&&l.topics[1]) evMarkets.add(addrOf(l.topics[1]));
+              const dwords=(l.data||'0x').replace(/^0x/,'');
+              for(let i=0;i<dwords.length/64;i++) evMarkets.add(addrOf('0x'+dwords.slice(i*64,i*64+64)));
+            }
+          }catch(_){ if(chunk>5000){chunk=5000;continue;} }
+          from=to+1;
+        }
+      }
+      out.markets=[]; let id=0;
+      for(const cand of [...evMarkets]){
+        // only keep addresses that respond to getSilos() (i.e., are SiloConfigs)
+        try{ await ethCall(cand,SEL.getSilos); out.markets.push(await labelMarket(++id,cand)); }catch(_){}
+      }
+      out.discoveredVia='NewSilo-event-scan';
+      out.note='Markets found by scanning factory NewSilo events.'; return out;
+    }catch(e){ out.steps.push({label:'eventScan',ok:false,error:e.message}); }
   }
-  out.note='Enumerates all Silo markets on XDC via factory idToSiloConfig. Each has its own rates/collateral.';
+
+  out.note='Could not locate factory. The known market is confirmed; others need the factory address.';
   return out;
 }
 
+async function labelMarket(id,config){
+  try{
+    const silosHex=await ethCall(config,SEL.getSilos);
+    const s0=addrOf(word(silosHex,0)), s1=addrOf(word(silosHex,1));
+    const a0=addrOf(await ethCall(s0,SEL.asset)), a1=addrOf(await ethCall(s1,SEL.asset));
+    let sym0='?',sym1='?';
+    try{sym0=decodeString(await ethCall(a0,SEL.symbol))||'?';}catch(_){}
+    try{sym1=decodeString(await ethCall(a1,SEL.symbol))||'?';}catch(_){}
+    return {id,config,pair:sym0+'/'+sym1,silo0:s0,silo1:s1};
+  }catch(e){ return {id,config,error:e.message}; }
+}
 
 async function diagnose(){ return getSiloMarket(); }
 module.exports={getSiloMarket,getSiloRates,getSiloCollateral,getWalletPosition,getRecentLiquidations,discoverMarkets,diagnose,diagnosePosition,MARKET,RPC};
