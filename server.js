@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.3.1 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.3.2 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -105,7 +105,7 @@ async function callFacilitator(step, paymentHeader, paymentRequirements) {
   throw err;
 }
 
-function x402(routeKey) {
+function x402(routeKey, precheck) {
   const { price, description } = ROUTES[routeKey];
 
   return async (req, res, next) => {
@@ -114,6 +114,22 @@ function x402(routeKey) {
 
     if (!payment) {
       return res.status(402).json({ x402Version: 1, accepts: [requirements] });
+    }
+
+    // VALIDATE BEFORE CHARGING: if the request can't be served, reject now —
+    // no verify, no settle, no funds moved.
+    if (precheck) {
+      try {
+        const problem = await precheck(req);
+        if (problem) {
+          return res.status(problem.status || 404).json({
+            ...problem.body,
+            payment: 'not taken — request rejected before settlement',
+          });
+        }
+      } catch (e) {
+        return res.status(503).json({ error: 'Validation unavailable, no payment taken', detail: e.message });
+      }
     }
 
     try {
@@ -372,11 +388,59 @@ async function getBestRate(asset) {
   };
 }
 
+// ── PRE-PAYMENT VALIDATION HELPERS ───────────────────────────────────────────
+const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+async function findProtocol(name) {
+  const data = await getLendingRates();
+  const n = norm(name);
+  const found = data.protocols.find(p => norm(p.protocol).includes(n) || n.includes(norm(p.protocol)));
+  return { data, found };
+}
+
+const precheckProtocol = async (req) => {
+  const { found, data } = await findProtocol(req.params.protocol);
+  if (!found) return { status: 404, body: {
+    error: `Protocol not found: ${req.params.protocol}`,
+    available: data.protocols.map(p => p.protocol),
+    dataSource: data.dataSource,
+  }};
+  req._protocol = { data, found };
+  return null;
+};
+
+const precheckWallet = (req) =>
+  (!req.params.wallet || !/^(0x|xdc)[0-9a-fA-F]{40}$/.test(req.params.wallet))
+    ? { status: 400, body: { error: 'Invalid wallet address — expected 0x… or xdc… (40 hex chars)' } }
+    : null;
+
+const precheckBorrowBody = (req) => {
+  const { collateralAsset, collateralAmount, borrowAsset } = req.body || {};
+  if (!collateralAsset || !collateralAmount || !borrowAsset)
+    return { status: 400, body: { error: 'Missing required fields', required: { collateralAsset: 'XDC|WXDC|WETH|WBTC|USDC', collateralAmount: 'number', borrowAsset: 'USDC|USDT' } } };
+  return null;
+};
+
+const precheckLiqBody = (req) => {
+  const { wallet, priceDropPercent } = req.body || {};
+  if (!wallet || priceDropPercent === undefined)
+    return { status: 400, body: { error: 'Missing required fields', required: { wallet: 'string', priceDropPercent: 'number 0-100' } } };
+  return null;
+};
+
+const precheckAsset = async (req) => {
+  const data = await getLendingRates();
+  const n = norm(req.params.asset);
+  const ok = data.protocols.some(p => p.assets.some(a => norm(a.asset).includes(n)));
+  if (!ok) return { status: 404, body: { error: `No rates for asset: ${req.params.asset}`, hint: 'Try USDC, USDT, XDC, WXDC', dataSource: data.dataSource } };
+  return null;
+};
+
 // ── FREE ROUTES ───────────────────────────────────────────────────────────────
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.3.1',
+  status: 'ok', service: 'XDC Lending API', version: '1.3.2',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -384,7 +448,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.3.1',
+  version: '1.3.2',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -400,29 +464,26 @@ app.get('/info', (_, res) => res.json({
 // ── PAID ROUTES ───────────────────────────────────────────────────────────────
 app.get('/rates', x402('GET /rates'), async (_, res) => res.json(await getLendingRates()));
 
-app.get('/rates/:protocol', x402('GET /rates/:protocol'), async (req, res) => {
-  const data = await getLendingRates();
-  const found = data.protocols.find(p => p.protocol.toLowerCase().includes(req.params.protocol.toLowerCase()));
+app.get('/rates/:protocol', x402('GET /rates/:protocol', precheckProtocol), async (req, res) => {
+  const { data, found } = req._protocol || await findProtocol(req.params.protocol);
   if (!found) return res.status(404).json({ error: `Protocol not found: ${req.params.protocol}`, available: data.protocols.map(p => p.protocol) });
   res.json({ timestamp: data.timestamp, network: data.network, dataSource: data.dataSource, protocol: found });
 });
 
 app.get('/collateral', x402('GET /collateral'), (_, res) => res.json(getCollateral()));
 
-app.get('/position/:wallet', x402('GET /position/:wallet'), (req, res) => {
-  if (!req.params.wallet || req.params.wallet.length < 10)
-    return res.status(400).json({ error: 'Invalid wallet address' });
+app.get('/position/:wallet', x402('GET /position/:wallet', precheckWallet), (req, res) => {
   res.json(getPosition(req.params.wallet));
 });
 
-app.post('/simulate/borrow', x402('POST /simulate/borrow'), async (req, res) => {
+app.post('/simulate/borrow', x402('POST /simulate/borrow', precheckBorrowBody), async (req, res) => {
   const { collateralAsset, collateralAmount, borrowAsset } = req.body;
   if (!collateralAsset || !collateralAmount || !borrowAsset)
     return res.status(400).json({ error: 'Missing required fields', required: { collateralAsset: 'XDC|WETH|WBTC|USDC', collateralAmount: 'number', borrowAsset: 'USDC|USDT' } });
   res.json(await simulateBorrow({ ...req.body, collateralAmount: Number(collateralAmount) }));
 });
 
-app.post('/simulate/liquidation', x402('POST /simulate/liquidation'), (req, res) => {
+app.post('/simulate/liquidation', x402('POST /simulate/liquidation', precheckLiqBody), (req, res) => {
   const { wallet, priceDropPercent } = req.body;
   if (!wallet || priceDropPercent === undefined)
     return res.status(400).json({ error: 'Missing required fields', required: { wallet: 'string', priceDropPercent: 'number 0-100' } });
@@ -431,11 +492,11 @@ app.post('/simulate/liquidation', x402('POST /simulate/liquidation'), (req, res)
 
 app.get('/liquidations/recent', x402('GET /liquidations/recent'), (_, res) => res.json(getRecentLiquidations()));
 
-app.get('/best-rate/:asset', x402('GET /best-rate/:asset'), async (req, res) => res.json(await getBestRate(req.params.asset)));
+app.get('/best-rate/:asset', x402('GET /best-rate/:asset', precheckAsset), async (req, res) => res.json(await getBestRate(req.params.asset)));
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.3.1 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.3.2 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
