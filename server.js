@@ -487,6 +487,11 @@ app.get('/silo/position-test', async (req, res) => {
   catch (e) { res.status(500).json({ error: 'position diagnostic failed', detail: e.message }); }
 });
 
+app.get('/silo/markets', async (_, res) => {
+  try { res.json(await silo.discoverMarkets()); }
+  catch (e) { res.status(500).json({ error: 'discovery failed', detail: e.message }); }
+});
+
 app.get('/silo/test', async (_, res) => {
   try {
     const diag = await silo.diagnose();
