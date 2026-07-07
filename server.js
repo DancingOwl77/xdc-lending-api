@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.5.0 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.5.1 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -448,7 +448,7 @@ const precheckAsset = async (req) => {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.5.0',
+  status: 'ok', service: 'XDC Lending API', version: '1.5.1',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -456,7 +456,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.5.0',
+  version: '1.5.1',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -538,7 +538,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset', precheckAsset), async
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.5.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.5.1 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
