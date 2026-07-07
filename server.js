@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.5.1 — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.6.0 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -362,7 +362,7 @@ function simulateLiquidation({ wallet, priceDropPercent }) {
   };
 }
 
-function getRecentLiquidations() {
+function getRecentLiquidationsDemo() {
   return {
     timestamp: new Date().toISOString(), network: 'XDC Mainnet',
     period: 'Last 24 hours', dataSource: 'demo',
@@ -448,8 +448,8 @@ const precheckAsset = async (req) => {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.5.1',
-  build: 'usd-positions',
+  status: 'ok', service: 'XDC Lending API', version: '1.6.0',
+  build: 'all-live',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -457,8 +457,8 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.5.1',
-  build: 'usd-positions',
+  version: '1.6.0',
+  build: 'all-live',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -542,13 +542,20 @@ app.post('/simulate/liquidation', x402('POST /simulate/liquidation', precheckLiq
   res.json(simulateLiquidation({ wallet, priceDropPercent: Number(priceDropPercent) }));
 });
 
-app.get('/liquidations/recent', x402('GET /liquidations/recent'), (_, res) => res.json(getRecentLiquidations()));
+app.get('/liquidations/recent', x402('GET /liquidations/recent'), async (_, res) => {
+  try {
+    res.json(await silo.getRecentLiquidationsDemo());
+  } catch (e) {
+    console.warn('[liquidations] on-chain scan failed:', e.message);
+    res.json({ ...getRecentLiquidationsDemo(), dataSource: 'demo-fallback', warning: 'on-chain scan failed' });
+  }
+});
 
 app.get('/best-rate/:asset', x402('GET /best-rate/:asset', precheckAsset), async (req, res) => res.json(await getBestRate(req.params.asset)));
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.5.1 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.6.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
