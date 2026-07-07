@@ -1,6 +1,6 @@
 /**
  * XDC Lending API — x402 Spec-Compliant for xdcai.tech/marketplace
- * v1.4.0-beta — rate limiting + live data via DeFiLlama with graceful fallback
+ * v1.4.0 — rate limiting + live data via DeFiLlama with graceful fallback
  *
  * x402 wire format per docs.xdcai.tech:
  *   network "xdc" · USDC 0xfA2958CB79b0491CC627c1557F441eF849Ca8eb1 (6 decimals)
@@ -226,6 +226,10 @@ async function getLendingRates() {
   const now = Date.now();
   if (ratesCache.data && now - ratesCache.fetchedAt < CACHE_TTL) return ratesCache.data;
 
+  // Live Silo Finance V3 (on-chain XDC reads) — prepended to whatever DeFiLlama returns
+  let siloProtocol = null;
+  try { siloProtocol = await silo.getSiloRates(); } catch (e) { console.warn('[silo] rates read failed:', e.message); }
+
   try {
     // DeFiLlama yields API — public, no key. Filter to XDC chain pools.
     const resp = await axios.get('https://yields.llama.fi/pools', { timeout: 10000 });
@@ -259,11 +263,14 @@ async function getLendingRates() {
       })),
     };
 
+    if (siloProtocol) data.protocols.unshift(siloProtocol);
     ratesCache = { data, fetchedAt: now };
     return data;
   } catch (err) {
     console.warn('[rates] live fetch failed, serving fallback:', err.message);
-    return { ...FALLBACK_RATES, timestamp: new Date().toISOString() };
+    const fb = { ...FALLBACK_RATES, timestamp: new Date().toISOString() };
+    if (siloProtocol) fb.protocols = [siloProtocol, ...fb.protocols];
+    return fb;
   }
 }
 
@@ -441,7 +448,7 @@ const precheckAsset = async (req) => {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.4.0-beta',
+  status: 'ok', service: 'XDC Lending API', version: '1.4.0',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
 
@@ -449,7 +456,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.4.0-beta',
+  version: '1.4.0',
   network: 'xdc',
   payment: {
     protocol: 'x402', asset: USDC_XDC, network: 'xdc', decimals: 6,
@@ -480,7 +487,17 @@ app.get('/rates/:protocol', x402('GET /rates/:protocol', precheckProtocol), asyn
   res.json({ timestamp: data.timestamp, network: data.network, dataSource: data.dataSource, protocol: found });
 });
 
-app.get('/collateral', x402('GET /collateral'), (_, res) => res.json(getCollateral()));
+app.get('/collateral', x402('GET /collateral'), async (_, res) => {
+  const base = getCollateral();
+  try {
+    const siloCol = await silo.getSiloCollateral();
+    if (siloCol && siloCol.length) {
+      base.siloMarkets = siloCol;
+      base.dataSource = 'silo-v3-onchain + reference';
+    }
+  } catch (e) { /* fall back to reference table only */ }
+  res.json(base);
+});
 
 app.get('/position/:wallet', x402('GET /position/:wallet', precheckWallet), (req, res) => {
   res.json(getPosition(req.params.wallet));
@@ -506,7 +523,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset', precheckAsset), async
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.4.0-beta → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.4.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
