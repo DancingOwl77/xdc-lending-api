@@ -233,6 +233,8 @@ async function getLendingRates() {
   try { siloProtocol = await silo.getSiloRates(); } catch (e) { console.warn('[silo] rates read failed:', e.message); }
   let primefiProtocol = null;
   try { primefiProtocol = await primefi.getPrimeFiRates(); } catch (e) { console.warn('[primefi] rates read failed:', e.message); }
+  let fathomProtocol = null;
+  try { fathomProtocol = await fathom.getFathomRates(); } catch (e) { console.warn('[fathom] rates read failed:', e.message); }
 
   try {
     // DeFiLlama yields API — public, no key. Filter to XDC chain pools.
@@ -269,6 +271,7 @@ async function getLendingRates() {
 
     if (Array.isArray(siloProtocol)) data.protocols.unshift(...siloProtocol); else if (siloProtocol) data.protocols.unshift(siloProtocol);
     if (primefiProtocol) data.protocols.unshift(primefiProtocol);
+    if (fathomProtocol) data.protocols.unshift(fathomProtocol);
     ratesCache = { data, fetchedAt: now };
     return data;
   } catch (err) {
@@ -276,6 +279,7 @@ async function getLendingRates() {
     const fb = { ...FALLBACK_RATES, timestamp: new Date().toISOString() };
     if (Array.isArray(siloProtocol)) fb.protocols = [...siloProtocol, ...fb.protocols]; else if (siloProtocol) fb.protocols = [siloProtocol, ...fb.protocols];
     if (primefiProtocol) fb.protocols = [primefiProtocol, ...fb.protocols];
+    if (fathomProtocol) fb.protocols = [fathomProtocol, ...fb.protocols];
     return fb;
   }
 }
@@ -454,7 +458,7 @@ const precheckAsset = async (req) => {
 app.get('/', (_, res) => res.redirect('/info'));
 
 app.get('/health', (_, res) => res.json({
-  status: 'ok', service: 'XDC Lending API', version: '1.8.0',
+  status: 'ok', service: 'XDC Lending API', version: '1.9.0',
   build: 'multi-protocol',
   network: 'xdc', timestamp: new Date().toISOString(),
 }));
@@ -463,7 +467,7 @@ app.get('/info', (_, res) => res.json({
   id: 'xdc-lending-api',
   name: 'XDC Lending API',
   description: 'Pay-per-call lending data for AI agents on XDC Network. Rates, positions, collateral, simulations, liquidations.',
-  version: '1.8.0',
+  version: '1.9.0',
   build: 'multi-protocol',
   network: 'xdc',
   payment: {
@@ -538,6 +542,10 @@ app.get('/collateral', x402('GET /collateral'), async (_, res) => {
       const pfCol = await primefi.getPrimeFiCollateral();
       if (pfCol && pfCol.length) { base.primefiMarkets = pfCol; base.dataSource = (base.dataSource||'') + ' + primefi-onchain'; }
     } catch(_) {}
+    try {
+      const fmCol = await fathom.getFathomCollateral();
+      if (fmCol && fmCol.length) { base.fathomMarkets = fmCol; base.dataSource = (base.dataSource||'') + ' + fathom-onchain'; }
+    } catch(_) {}
   } catch (e) { /* fall back to reference table only */ }
   res.json(base);
 });
@@ -580,7 +588,7 @@ app.get('/best-rate/:asset', x402('GET /best-rate/:asset', precheckAsset), async
 
 // ── START ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`XDC Lending API v1.8.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
+  console.log(`XDC Lending API v1.9.0 → port ${PORT} | payTo ${RECEIVER_WALLET}`);
 });
 
 module.exports = app;
