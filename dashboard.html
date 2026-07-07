@@ -594,7 +594,7 @@ async function refresh() {
 
     // wallet
     document.getElementById('walletAddr').textContent = s.wallet.address;
-    document.getElementById('explorerLink').href = 'https://xdcscan.io/address/' + s.wallet.address.replace(/^0x/, 'xdc');
+    document.getElementById('explorerLink').href = 'https://xdcscan.com/address/' + s.wallet.address;
     document.getElementById('usdcBalance').textContent = s.wallet.usdcBalance != null ? fmt(s.wallet.usdcBalance, 4) + ' USDC' : 'unavailable';
     document.getElementById('revSince').textContent = '$' + fmt(s.totals.revenueUSDC, 4);
     document.getElementById('paidRatio').textContent = fmt(s.totals.paidCalls,0) + ' / ' + fmt(s.totals.calls,0);
