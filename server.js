@@ -469,6 +469,14 @@ app.get('/info', (_, res) => res.json({
   tags: ['lending', 'defi', 'xdc', 'rates', 'positions', 'liquidations'],
 }));
 
+app.get('/silo/position-test', async (req, res) => {
+  const wallet = req.query.wallet;
+  if (!wallet || !/^(0x|xdc)[0-9a-fA-F]{40}$/.test(wallet))
+    return res.status(400).json({ error: 'Provide ?wallet=0x… (a wallet with a Silo position)' });
+  try { res.json(await silo.diagnosePosition(wallet)); }
+  catch (e) { res.status(500).json({ error: 'position diagnostic failed', detail: e.message }); }
+});
+
 app.get('/silo/test', async (_, res) => {
   try {
     const diag = await silo.diagnose();
